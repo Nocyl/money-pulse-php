@@ -1,0 +1,42 @@
+{
+  "name": "money-pulse/money-pulse-php",
+  "description": "Official Money-Pulse PHP SDK — Accept payments and process payouts across Africa.",
+  "type": "library",
+  "license": "MIT",
+  "homepage": "https://money-pulse.org",
+  "keywords": [
+    "money-pulse",
+    "payments",
+    "africa",
+    "mobile-money",
+    "sdk",
+    "fedapay",
+    "kkiapay",
+    "xof",
+    "xaf",
+    "paiement"
+  ],
+  "authors": [
+    {
+      "name": "NOCYL-PULSE",
+      "email": "dev@money-pulse.org",
+      "homepage": "https://money-pulse.org",
+      "role": "Developer"
+    }
+  ],
+  "require": {
+    "php": ">=7.4",
+    "ext-curl": "*",
+    "ext-json": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "MoneyPulse\\": "src/"
+    }
+  },
+  "minimum-stability": "stable",
+  "support": {
+    "issues": "https://github.com/Nocyl/money-pulse-php/issues",
+    "source": "https://github.com/Nocyl/money-pulse-php"
+  }
+}
