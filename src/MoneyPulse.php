@@ -69,18 +69,18 @@ class Payment
 
     public function retrieve(string $id): array
     {
-        return $this->client->request('GET', "/api/v1/payments/{$id}");
+        // FIX (F-056) : le backend n'expose pas GET /api/v1/payments/{id}.
+        // La seule route de lecture par identifiant est /:transactionId/status
+        // (cf backend/src/routes/payments.ts).
+        return $this->client->request('GET', "/api/v1/payments/{$id}/status");
     }
 
-    public function verify(string $id): array
-    {
-        return $this->client->request('GET', "/api/v1/payments/{$id}/verify");
-    }
-
-    public function markAsProcessed(string $id): array
-    {
-        return $this->client->request('POST', "/api/v1/payments/{$id}/mark-processed");
-    }
+    // FIX (F-056) : verify() et markAsProcessed() sont retirees. Aucune route
+    // backend ne les expose ( /api/v1/payments/{id}/verify et
+    // /api/v1/payments/{id}/mark-processed sont inexistantes dans
+    // backend/src/routes/payments.ts ) — les garder ferait echouer tout appel
+    // en 404. Si ces fonctionnalites deviennent necessaires, elles doivent
+    // d'abord etre exposees cote backend avant d'etre re-ajoutees ici.
 }
 
 class Payout
@@ -90,18 +90,18 @@ class Payout
 
     public function create(array $params): array
     {
-        return $this->client->request('POST', '/api/v1/payouts/initiate', $params);
+        // FIX (F-056bis) : le backend expose POST /api/v1/payouts (sans
+        // /initiate) — cf backend/src/routes/payouts.ts ligne
+        // `router.post('/', PayoutController.createPayout)`.
+        return $this->client->request('POST', '/api/v1/payouts', $params);
     }
 
-    public function retrieve(string $id): array
-    {
-        return $this->client->request('GET', "/api/v1/payouts/{$id}");
-    }
-
-    public function verify(string $id): array
-    {
-        return $this->client->request('GET', "/api/v1/payouts/{$id}/verify");
-    }
+    // FIX (F-056bis) : retrieve() et verify() sont retirees. Le backend
+    // n'expose aucune route GET /api/v1/payouts/{id} ni
+    // /api/v1/payouts/{id}/verify (cf backend/src/routes/payouts.ts, qui
+    // n'expose que GET '/' pour lister et GET '/balance'). Tout appel a ces
+    // methodes echouait systematiquement en 404. A re-ajouter seulement
+    // si ces routes sont creees cote backend.
 }
 
 class MoneyPulseException extends \Exception
