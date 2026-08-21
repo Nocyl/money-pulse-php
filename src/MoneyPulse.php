@@ -16,19 +16,37 @@ class MoneyPulseClient
         $this->payouts = new Payout($this);
     }
 
-    public function request(string $method, string $path, array $data = []): array
+    /**
+     * AUDIT 20/08/2026 : paramètre $idempotencyKey ajouté — confirmé
+     * ABSENT du fichier source original fourni par Yves. Sans lui, un
+     * échec réseau cURL suivi d'un nouvel appel (retry manuel côté
+     * appelant, ou logique applicative) pouvait produire un paiement ou
+     * un RETRAIT EN DOUBLE, le backend n'ayant aucun moyen de reconnaître
+     * qu'il s'agissait de la même opération logique. Le middleware
+     * backend (middleware/idempotency.ts, confirmé plus tôt cette
+     * session) protège déjà /api/v1/payments/initiate et
+     * /api/v1/payouts, mais uniquement si le header `Idempotency-Key`
+     * est présent — jamais envoyé par ce SDK avant ce correctif.
+     */
+    public function request(string $method, string $path, array $data = [], ?string $idempotencyKey = null): array
     {
         $url = $this->baseUrl . $path;
         $ch = curl_init();
+
+        $headers = [
+            'X-Api-Key: ' . $this->secretKey,
+            'Content-Type: application/json',
+            'X-SDK: money-pulse-php/1.0.0',
+        ];
+        if ($idempotencyKey !== null) {
+            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+        }
+
         curl_setopt_array($ch, [
             CURLOPT_URL => $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => 30,
-            CURLOPT_HTTPHEADER => [
-                'X-Api-Key: ' . $this->secretKey,
-                'Content-Type: application/json',
-                'X-SDK: money-pulse-php/1.0.0',
-            ],
+            CURLOPT_HTTPHEADER => $headers,
         ]);
 
         if ($method === 'POST') {
@@ -62,9 +80,18 @@ class Payment
     private MoneyPulseClient $client;
     public function __construct(MoneyPulseClient $client) { $this->client = $client; }
 
+    /**
+     * AUDIT 20/08/2026 : génère automatiquement une clé d'idempotence via
+     * random_bytes() (natif PHP 7+, pas de dépendance ajoutée) si l'appelant
+     * n'en fournit pas une dans $params['idempotency_key']. Cette clé est
+     * retirée du corps JSON envoyé (le backend ne l'attend qu'en header,
+     * pas dans le payload — voir middleware/idempotency.ts) avant l'appel.
+     */
     public function create(array $params): array
     {
-        return $this->client->request('POST', '/api/v1/payments/initiate', $params);
+        $idempotencyKey = $params['idempotency_key'] ?? bin2hex(random_bytes(16));
+        unset($params['idempotency_key']);
+        return $this->client->request('POST', '/api/v1/payments/initiate', $params, $idempotencyKey);
     }
 
     public function retrieve(string $id): array
@@ -88,12 +115,20 @@ class Payout
     private MoneyPulseClient $client;
     public function __construct(MoneyPulseClient $client) { $this->client = $client; }
 
+    /**
+     * AUDIT 20/08/2026 : même correctif que Payment::create() —
+     * PRIORITAIRE ici, un retrait en double déplace réellement des fonds
+     * hors du solde marchand (contrairement à un paiement, où le client
+     * final subirait au pire un double débit visible et contestable).
+     */
     public function create(array $params): array
     {
         // FIX (F-056bis) : le backend expose POST /api/v1/payouts (sans
         // /initiate) — cf backend/src/routes/payouts.ts ligne
         // `router.post('/', PayoutController.createPayout)`.
-        return $this->client->request('POST', '/api/v1/payouts', $params);
+        $idempotencyKey = $params['idempotency_key'] ?? bin2hex(random_bytes(16));
+        unset($params['idempotency_key']);
+        return $this->client->request('POST', '/api/v1/payouts', $params, $idempotencyKey);
     }
 
     // FIX (F-056bis) : retrieve() et verify() sont retirees. Le backend
