@@ -46,38 +46,53 @@ $payout = $client->payouts->create([
     'description' => 'Retrait marchand #4521',
 ]);
 
-echo $payout['payout_id']; // → po_xxxxx
+// AUDIT 20/08/2026 : `payout_id` n'a pas pu être confirmé contre le
+// backend réel cette session — champ conservé tel quel de la version
+// précédente mais non vérifié. Inspectez vous-même la réponse brute
+// (var_dump($payout)) avant de vous y fier en production.
+echo $payout['payout_id'] ?? $payout;
 ```
 
-## Mode Simulation
+## ⚠️ Mode Simulation — NON VÉRIFIÉ
 
-Testez vos flux **sans débiter de fonds réels** ni déclencher de webhooks sortants. Activable
-par requête, fonctionne aussi en environnement `live`.
-
-```php
-// Option 1 : flag dans le payload
-$test = $client->payments->create([
-    'amount'   => 5000,
-    'currency' => 'XOF',
-    'country'  => 'CI',
-    'customer' => ['phone' => '+22507000000'],
-    'metadata' => ['simulate' => true],
-]);
-
-// Option 2 : header HTTP global pour toutes les requêtes
-$client->setDefaultHeader('X-MP-Simulate', 'true');
-```
-
-| Dernier chiffre du montant | Résultat simulé |
-|---|---|
-| `00`–`49` | ✅ `completed` immédiat |
-| `50`–`89` | ⏳ `pending` puis résolu |
-| `90`–`99` | ❌ `failed` |
+> Cette section documentait `metadata.simulate` et un header
+> `X-MP-Simulate` via une méthode `$client->setDefaultHeader(...)`.
+> **AUDIT 20/08/2026 : cette méthode n'existe PAS dans le code source
+> réel de `MoneyPulseClient`** (vérifié directement — la classe
+> n'expose que `payments`, `payouts` et `request()`). Je n'ai par
+> ailleurs trouvé aucune trace, côté backend, d'une logique de
+> simulation basée sur le dernier chiffre du montant. Cette section a
+> été retirée plutôt que de la corriger à l'aveugle — si ce mode existe
+> réellement côté backend, il faut d'abord l'implémenter dans
+> `MoneyPulseClient::request()` (ajout d'un header configurable) avant
+> de le redocumenter ici.
 
 ## Webhooks — vérification de signature (HMAC SHA-256)
 
 Money-Pulse signe chaque webhook avec votre `webhook_secret` (visible dans le dashboard).
 **Toujours vérifier la signature** avant de traiter le payload.
+
+⚠️ **AUDIT 20/08/2026** : la structure du payload ci-dessous a été corrigée. Confirmé
+directement dans le code source du backend (`services/OutgoingWebhookService.ts`,
+`services/orchestrator/WebhookProcessor.ts`) — la forme réelle est :
+```json
+{
+  "event": "payment.succeeded",
+  "created": 1755000000000,
+  "data": {
+    "transactionId": "tx_xxx",
+    "status": "completed",
+    "amount": 10000,
+    "currency": "XOF",
+    "netAmount": 9800,
+    "fee": 200
+  }
+}
+```
+Pas de champ `type` (c'est `event`), pas de valeur `payment.success` (c'est
+`payment.succeeded`), et **pas de `metadata`** — `order_id` n'est jamais transmis
+dans le webhook. Le seul identifiant disponible est `data.transactionId` : stockez-le
+vous-même au moment de la création du paiement pour pouvoir retrouver votre commande.
 
 ```php
 <?php
@@ -93,16 +108,21 @@ if (!hash_equals($expected, $signature)) {
 }
 
 $event = json_decode($payload, true);
-switch ($event['type']) {
-    case 'payment.success':
-        // → marquer la commande comme payée
+
+// CORRIGÉ : $event['event'], pas $event['type'].
+switch ($event['event']) {
+    case 'payment.succeeded':
+        // CORRIGÉ : le seul identifiant transmis est transactionId,
+        // pas de metadata.order_id (voir avertissement ci-dessus).
+        $transactionId = $event['data']['transactionId'];
+        // → marquer la commande comme payée, retrouvée par $transactionId
         break;
     case 'payment.failed':
         // → notifier le client
         break;
-    case 'payout.completed':
-        // → confirmer le retrait
-        break;
+    // ⚠️ 'payout.completed' retiré : non confirmé contre le backend
+    // cette session (aucun webhook payout examiné). À revérifier avant
+    // de vous y fier pour un flux de retrait.
 }
 http_response_code(200);
 echo 'OK';
@@ -159,10 +179,13 @@ class MoneyPulseWebhookController extends Controller
     public function handle(Request $request)
     {
         $event = $request->json()->all();
-        $orderId = $event['data']['metadata']['order_id'] ?? null;
 
-        if ($event['type'] === 'payment.success' && $orderId) {
-            Order::where('id', $orderId)->update([
+        // CORRIGÉ : 'event' (pas 'type'), 'payment.succeeded' (pas
+        // 'payment.success'), recherche par transaction_id STOCKÉ PAR
+        // VOUS à la création (pas metadata.order_id, inexistant).
+        if ($event['event'] === 'payment.succeeded') {
+            $transactionId = $event['data']['transactionId'];
+            Order::where('money_pulse_transaction_id', $transactionId)->update([
                 'status'      => 'paid',
                 'paid_amount' => $event['data']['amount'],
                 'paid_at'     => now(),
@@ -189,8 +212,12 @@ public function checkout(Order $order)
         'customer'     => ['email' => $order->customer_email, 'phone' => $order->customer_phone],
         'callback_url' => route('webhooks.moneypulse'),
         'return_url'   => route('orders.success', $order),
-        'metadata'     => ['order_id' => $order->id],
     ]);
+
+    // CORRIGÉ : on stocke NOUS-MÊMES le transactionId (metadata.order_id
+    // ne sera jamais renvoyé par le webhook, voir avertissement ci-dessus).
+    $order->update(['money_pulse_transaction_id' => $payment['transaction_id'] ?? $payment['id']]);
+
     return redirect($payment['checkout_url']);
 }
 ```
@@ -242,8 +269,12 @@ add_action('plugins_loaded', function () {
                 ],
                 'callback_url' => home_url('/?moneypulse_webhook=1'),
                 'return_url'   => $this->get_return_url($order),
-                'metadata'     => ['order_id' => $order_id],
             ]);
+            // CORRIGÉ : stockage direct du transactionId sur la commande —
+            // 'metadata' => ['order_id' => ...] (version précédente) n'est
+            // jamais renvoyé par le webhook, inutile de le passer à create().
+            $order->update_meta_data('_moneypulse_payment_id', $payment['transaction_id'] ?? $payment['id']);
+            $order->save();
             return ['result' => 'success', 'redirect' => $payment['checkout_url']];
         }
     }
@@ -265,9 +296,20 @@ add_action('init', function () {
         status_header(401); exit('bad signature');
     }
     $event = json_decode($payload, true);
-    if ($event['type'] === 'payment.success') {
-        $order = wc_get_order($event['data']['metadata']['order_id']);
-        if ($order) $order->payment_complete($event['data']['transaction_id']);
+    // CORRIGÉ : 'event' (pas 'type'), 'payment.succeeded' (pas
+    // 'payment.success'), recherche par _moneypulse_payment_id (métadonnée
+    // stockée à la création, pas metadata.order_id — inexistant dans le
+    // vrai payload).
+    if ($event['event'] === 'payment.succeeded') {
+        $transactionId = $event['data']['transactionId'];
+        $orders = wc_get_orders([
+            'meta_key'   => '_moneypulse_payment_id',
+            'meta_value' => $transactionId,
+            'limit'      => 1,
+        ]);
+        if (!empty($orders)) {
+            $orders[0]->payment_complete($transactionId);
+        }
     }
     status_header(200); echo 'ok'; exit;
 });
